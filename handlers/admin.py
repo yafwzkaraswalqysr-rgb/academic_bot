@@ -17,7 +17,6 @@ from urllib.parse import urlparse
 from student_system import load_buttons,save_buttons,DEFAULT_BUTTONS
 from utils.helpers import get_main_menu_for_user
 from utils.admin_access import is_admin, is_owner
-from services.content_index import extract_telegram_document
 from services.search_engine import search_engine
 from services.usage_service import record_event
 from utils.security import safe_html_escape
@@ -34,6 +33,9 @@ def menu():
     ])
 class A(StatesGroup):
     tg_name=State();tg_user=State();tg_edit=State();web_name=State();web_search=State();web_edit=State();button_label=State();button_content=State();button_link=State();school_file=State();school_path=State();school_title=State();school_publish_branch=State();school_edit=State()
+    # الحالات الجديدة للتحكم اليدوي بالوصف
+    school_ask_desc=State()
+    school_custom_desc=State()
 
 @router.message(Command('admin'))
 @router.message(F.text=='🛠 لوحة المالك')
@@ -164,7 +166,6 @@ async def tg_edit_save(m,state):
     async with async_session_maker() as s:
         x=await s.get(TelegramSource,sid)
         if not x:return await m.answer('المصدر غير موجود.')
-        # Avoid the unique username collision with another source.
         from sqlalchemy import select as sa_select
         dup=await s.scalar(sa_select(TelegramSource).where(TelegramSource.username==ident,TelegramSource.id!=sid))
         if dup:return await m.answer('❌ هذا المعرف مستخدم من مصدر Telegram آخر.')
@@ -258,10 +259,6 @@ async def wsearch(m,state):
     async with async_session_maker() as s:s.add(WebSource(name=d['name'],base_url=base,search_url=url));await s.commit()
     search_engine.invalidate(); await state.clear();await m.answer('✅ تمت إضافة الموقع.',reply_markup=menu())
 
-# ---- Owner PDF publishing workflow -------------------------------------------------
-# A PDF uploaded while the owner is adding a button is treated as content to
-# publish, never as an AI document. The owner chooses the exact destination.
-
 class PdfPlacementStates(StatesGroup):
     path = State()
 
@@ -293,13 +290,6 @@ async def process_admin_document(message, state):
     return True
 
 async def _parse_placement(raw):
-    """Parse a human-readable owner placement path.
-
-    Supported example:
-    مدرستي > السادس المهني > الصناعي > الكهرباء > المرحلة الثالثة > الطبيعيات > كتب
-    The order is intentionally flexible; the owner can place the content exactly
-    where it belongs instead of sending the file to AI.
-    """
     parts = [x.strip() for x in raw.replace('→','>').split('>') if x.strip()]
     if not parts:
         return None
@@ -307,7 +297,6 @@ async def _parse_placement(raw):
     if top not in {'مدرستي', 'الجامعة', 'دراستي', 'دراسة حرة', 'القائمة الرئيسية'}:
         return None
     if top != 'مدرستي':
-        # This workflow currently publishes school-library content.
         return None
 
     known_types = {
@@ -325,8 +314,6 @@ async def _parse_placement(raw):
         content_type = '📚 كتب'
     without_type = [x for x in parts[1:] if x not in known_types]
 
-    # Common placement tokens. We preserve unknown tokens as the deepest
-    # meaningful level rather than rejecting a path created by the owner.
     placement = dict(scope='school', content_type=content_type, stage='', grade='', branch='', department='', subject='')
     for x in without_type:
         if x in {'المرحلة الأولى','المرحلة الثانية','المرحلة الثالثة'}:
@@ -354,8 +341,6 @@ async def owner_pdf_path(m, state):
         return await m.answer('❌ المسار غير مفهوم. مثال:\n<code>مدرستي &gt; السادس المهني &gt; الصناعي &gt; الكهرباء &gt; المرحلة الثالثة &gt; الطبيعيات</code>', parse_mode='HTML')
     from models import SchoolContent, SchoolPlacement
     async with async_session_maker() as s:
-        # Legacy text-path publishing now uses the same normalized
-        # one-file/many-placements model as the button workflow.
         item = SchoolContent(
             title=d.get('pending_title') or d.get('pending_filename') or 'ملف PDF',
             content_type=placement['content_type'],
@@ -373,12 +358,6 @@ async def owner_pdf_path(m, state):
     await state.clear()
     await m.answer('✅ <b>تم حفظ الزر والملف بنجاح.</b>\n\n📍 المكان:\n'+m.text.strip()+'\n\n📄 الملف سيُرسل للمستخدم مباشرة، ولن يُرسل تلقائيًا إلى الذكاء الاصطناعي.', parse_mode='HTML', reply_markup=menu())
 
-
-# ============================================================
-# SCHOOL LIBRARY — ONE FILE, MANY PUBLICATION PLACEMENTS
-# The PDF is stored once in school_contents. Each appearance in
-# a school section is a lightweight row in school_placements.
-# ============================================================
 from sqlalchemy import or_
 from models import SchoolPlacement
 
@@ -431,13 +410,13 @@ async def sc_add(c,state):
         f"➕ <b>{kind}</b>\n\n"
         "أرسل المحتوى مرة واحدة، ويمكن أن يكون:\n"
         "📝 نص\n🔗 رابط http/https\n🖼 صورة\n🎬 فيديو\n📎 ملف (PDF / DOCX / PPTX / TXT)\n\n"
-        "بعد استلامه ستختار أكثر من قسم/مادة للنشر بدون إعادة الإرسال.",
+        "بعد استلامه سيسألك البوت عما إذا كنت تريد إضافة وصف يدوي.",
         parse_mode="HTML"
     )
     await c.answer()
 
 async def _begin_school_content(message, state, *, content_kind, text_content="", url="", photo_id="", video_id="", file_id="", filename="", mime_type=""):
-    """Store one owner content item in FSM; publication paths are selected later."""
+    """بدلاً من الاستخراج التلقائي المزعج، نقوم بحفظ الملف مؤقتاً ونعرض خيار الوصف (نعم / لا)"""
     text_content=(text_content or "").strip()[:250000]
     url=(url or "").strip()[:2000]
     await state.update_data(
@@ -450,10 +429,56 @@ async def _begin_school_content(message, state, *, content_kind, text_content=""
         pending_mime_type=mime_type or "",
         default_title=(filename.rsplit(".",1)[0] if filename else (text_content[:80] or content_kind))[:500],
     )
-    await state.set_state(A.school_title)
-    d=await state.get_data()
+    
+    # الانتقال إلى حالة سؤال الوصف اليدوي بدلاً من المتابعة التلقائية
+    await state.set_state(A.school_ask_desc)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✍️ نعم، إضافة وصف", callback_data="sc_desc_yes"),
+            InlineKeyboardButton(text="❌ لا، بدون وصف", callback_data="sc_desc_no")
+        ]
+    ])
+    
     await message.answer(
-        f"✅ تم استلام {content_kind}.\n\n"
+        f"✅ تم استلام الملف بنجاح: <b>{safe_html_escape(filename or content_kind)}</b>\n\n"
+        "❓ <b>هل تريد إضافة وصف لهذا الكتاب/الملف؟</b>",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+# معالجة اختيار عدم إضافة وصف
+@router.callback_query(A.school_ask_desc, F.data == "sc_desc_no")
+async def owner_desc_no(c: CallbackQuery, state: FSMContext):
+    await state.update_data(pending_text_content="")
+    await c.answer("تم تخطي الوصف.")
+    await state.set_state(A.school_title)
+    d = await state.get_data()
+    await c.message.edit_text(
+        f"✏️ أرسل عنوان المحتوى، أو اكتب <code>نفس</code> لاستخدام العنوان المقترح:\n"
+        f"<b>{safe_html_escape(d.get('default_title','محتوى'))}</b>",
+        parse_mode="HTML"
+    )
+
+# معالجة اختيار إضافة وصف
+@router.callback_query(A.school_ask_desc, F.data == "sc_desc_yes")
+async def owner_desc_yes(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    await state.set_state(A.school_custom_desc)
+    await c.message.edit_text(
+        "📝 <b>يرجى إرسال نص الوصف الذي تريده لهذا الكتاب الآن:</b>",
+        parse_mode="HTML"
+    )
+
+# استقبال الوصف المكتوب يدوياً من المالك
+@router.message(A.school_custom_desc, F.text)
+async def owner_custom_desc_text(m: Message, state: FSMContext):
+    custom_text = m.text.strip()[:250000]
+    await state.update_data(pending_text_content=custom_text)
+    await state.set_state(A.school_title)
+    d = await state.get_data()
+    await m.answer(
+        f"✅ تم حفظ الوصف.\n\n"
         f"✏️ أرسل عنوان المحتوى، أو اكتب <code>نفس</code> لاستخدام العنوان المقترح:\n"
         f"<b>{safe_html_escape(d.get('default_title','محتوى'))}</b>",
         parse_mode="HTML"
@@ -471,13 +496,8 @@ async def owner_school_document_input(m, state):
     if doc.file_size and doc.file_size > MAX_FILE_SIZE:
         return await m.answer(f"❌ الملف كبير جدًا. الحد {MAX_FILE_SIZE/1024/1024:.0f} MB.")
     d=await state.get_data()
-    await m.answer('🔎 جارٍ استخراج النص وفهرسة الملف ليظهر في البحث...')
-    extracted=''
-    try:
-        extracted=await extract_telegram_document(m.bot,doc.file_id,name,doc.mime_type)
-    except Exception:
-        extracted=''
-    await _begin_school_content(m,state,content_kind=d.get("school_kind","المحتوى"),text_content=extracted,file_id=doc.file_id,filename=name,mime_type=doc.mime_type or "application/octet-stream")
+    # تم إلغاء الاستخراج التلقائي للنص (extract_telegram_document) هنا تماماً بناءً على طلبك
+    await _begin_school_content(m,state,content_kind=d.get("school_kind","المحتوى"),text_content="",file_id=doc.file_id,filename=name,mime_type=doc.mime_type or "application/octet-stream")
 
 @router.message(A.school_file, F.photo)
 async def owner_school_photo_input(m, state):
@@ -515,17 +535,11 @@ async def process_owner_school_document(message,state):
     if doc.file_size and doc.file_size > MAX_FILE_SIZE:
         await message.answer(f"❌ الملف كبير جدًا ({doc.file_size/1024/1024:.1f} MB). الحد: {MAX_FILE_SIZE/1024/1024:.0f} MB.")
         return True
-    extracted=''
-    try:
-        await message.answer('🔎 جارٍ استخراج النص وفهرسة الملف...')
-        extracted=await extract_telegram_document(message.bot,doc.file_id,filename,doc.mime_type)
-    except Exception:
-        extracted=''
     await state.update_data(
         pending_file_id=doc.file_id,
         pending_filename=filename,
         pending_mime_type=doc.mime_type or "application/octet-stream",
-        pending_text_content=extracted[:250000],
+        pending_text_content="",
     )
     await state.set_state(A.school_title)
     default=(doc.file_name or "ملف").rsplit(".",1)[0][:500]
@@ -538,7 +552,6 @@ async def process_owner_school_document(message,state):
     return True
 
 def parse_school_path(raw,kind):
-    """Legacy text-path parser retained for compatibility."""
     parts=[x.strip() for x in raw.replace("→",">").split(">") if x.strip()]
     p={"stage":"","grade":"","branch":"","department":"","subject":""}
     grades={"الأول ابتدائي","الثاني ابتدائي","الثالث ابتدائي","الرابع ابتدائي","الخامس ابتدائي","السادس ابتدائي",
@@ -614,9 +627,6 @@ async def sc_pub_scope(c,state):
         await state.update_data(pub_branch=branch,pub_grades=grades)
         await c.message.answer(f"📚 اختر صف {branch}:",reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     elif scope=="external":
-        # الطالب الخارجي له مسار مستقل: ابتدائي -> سادس ابتدائي،
-        # متوسط -> ثالث متوسط، إعدادي -> علمي/أدبي ثم الصف،
-        # مهني -> الفرع -> القسم -> المرحلة.
         rows=[
             [InlineKeyboardButton(text="🏫 ابتدائي",callback_data="sc_ext_level:primary")],
             [InlineKeyboardButton(text="🏫 متوسطة",callback_data="sc_ext_level:middle")],
@@ -641,12 +651,6 @@ async def sc_pub_root(c,state):
 
 @router.callback_query(F.data.startswith("sc_pub_branch:"))
 async def sc_pub_branch(c,state):
-    """Open the vocational branch/stage picker for the publish workflow.
-
-    This callback is also used by the summary's Back button and by the
-    edit-existing-file flow, so it must be a real handler rather than a
-    callback that points to a non-existent route.
-    """
     if not is_admin(c.from_user.id):
         return await c.answer("غير مسموح", show_alert=True)
     branch = c.data.split(":", 1)[1].strip()
@@ -784,7 +788,6 @@ async def sc_ext_vdept(c,state):
     except Exception: return await c.answer("خيار غير صالح",show_alert=True)
     branch=d.get("pub_ext_vbranch","")
     await state.update_data(pub_branch="خارجي / مهني / "+branch,pub_department=dept,pub_grade="السادس المهني",pub_stage="")
-    # For vocational external material, show the three vocational stages.
     stages=VOC_STAGES
     rows=[[InlineKeyboardButton(text=x,callback_data=f"sc_ext_vstage:{i}")] for i,x in enumerate(stages)]
     rows.append([InlineKeyboardButton(text="⬅️ رجوع",callback_data=f"sc_ext_vbranch:{VOC_BRANCHES.index(branch) if branch in VOC_BRANCHES else 0}")])
@@ -845,7 +848,6 @@ async def sc_pub_subject(c,state):
         elif scope=="middle": path_branch="متوسطة"; placement_stage="🏫 متوسطة"
         elif scope=="external":
             path_branch=branch or "خارجي"; placement_stage=""
-            # Keep the external hierarchy in branch/department/stage.
         else: path_branch=branch; placement_stage="🏫 إعدادية"
         ext_department = d.get("pub_department", "") if scope=="external" else ""
         ext_stage = stage if scope=="external" and stage else placement_stage
@@ -943,9 +945,6 @@ async def sc_pub_save(c,state):
         await c.message.answer("✅ تمت إضافة أماكن النشر بدون إعادة رفع الملف.",reply_markup=school_owner_menu())
         return await c.answer()
     async with async_session_maker() as s:
-        # One physical Telegram file row; all destinations are separate placements.
-        # Also mirror the first placement into legacy columns for compatibility
-        # with older database/reporting code.
         first = placements[0]
         item=SchoolContent(
             title=d.get("pending_title") or d.get("pending_filename") or "ملف",
@@ -1006,7 +1005,6 @@ async def sc_pub_back(c,state):
     await c.answer()
 
 def _validate_school_placements(kind, placements):
-    """Prevent publishing a grade-specific school category into the wrong path."""
     rules = {
         "📋 وزاريات السادس الابتدائي": lambda p: p.get("grade") == "السادس الابتدائي" and p.get("branch") == "ابتدائية",
         "📋 وزاريات الثالث المتوسط": lambda p: p.get("grade") == "الثالث المتوسط" and p.get("branch") == "متوسطة",
@@ -1030,7 +1028,6 @@ async def _show_publish_summary(c,state):
                                 [InlineKeyboardButton(text="⬅️ رجوع",callback_data="sc_pub_back")]
                             ]))
 
-# ---- management: one file vs one placement ----
 async def content_list():
     async with async_session_maker() as s:
         return (await s.execute(select(SchoolContent).order_by(SchoolContent.id.desc()).limit(50))).scalars().all()
@@ -1161,4 +1158,3 @@ async def sc_edit_add(c,state):
                                [InlineKeyboardButton(text="🌾 الزراعي",callback_data="sc_pub_branch:الزراعي")],
                                [InlineKeyboardButton(text="💻 الحاسوب وتقنيات المعلومات",callback_data="sc_pub_branch:الحاسوب وتقنيات المعلومات")]
                            ])); await c.answer()
-
