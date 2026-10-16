@@ -87,7 +87,7 @@ async def document(m: Message, state: FSMContext):
         await download_telegram_file(m.bot,tg_file.file_path,path)
         if path.stat().st_size>MAX_FILE_SIZE: raise RuntimeError("الملف بعد التنزيل تجاوز الحد المسموح.")
 
-        await status.edit_text("📝 تم تنزيل الملف. جارٍ استخراج النص فقط...\nلا يوجد اختبار أو تحليل تلقائي الآن.")
+        await status.edit_text("📝 تم تنزيل الملف. جارٍ استخراج النص وفهرسته...")
         try:
             text=await extract_text(str(path))
         except ValueError as local_exc:
@@ -109,24 +109,28 @@ async def document(m: Message, state: FSMContext):
                 db_user.upload_count=(db_user.upload_count or 0)+1
                 await session.commit()
 
-        # Persist the extracted material in the database. FSM only tracks the
-        # current UI state, so restart does not destroy the material context.
+        # Persist the extracted material in the database silently without sending it as a chat message.
         section = 'school'
         async with async_session_maker() as ss:
             profile = await ss.scalar(select(StudentProfile).join(User, User.id == StudentProfile.user_id).where(User.telegram_id == m.from_user.id))
         if not profile:
             section = 'university'
+            
         await save_session(m.from_user.id, title=filename, text=text, section=section)
         await record_event(m.from_user.id, 'file_added', metadata={'extension': ext, 'chars': len(text)})
-        await state.clear(); await state.set_state(AITutorStates.mode)
-        preview=safe_html_escape(truncate(text,3200))
-        if len(text)>3200: preview += "\n\n… تم اختصار المعاينة. المادة الكاملة محفوظة للجلسة."
+        
+        await state.clear()
+        await state.set_state(AITutorStates.mode)
+        
+        # Clean update message showing success and options without flooding the chat with the text content
         await status.edit_text(
-            "✅ <b>تم استخراج النص بنجاح</b>\n\n"
+            f"✅ <b>تم استلام الملف وفهرسته بنجاح</b>\n\n"
             f"📄 الملف: <b>{safe_html_escape(filename)}</b>\n"
-            f"📝 الأحرف المستخرجة: <b>{len(text):,}</b>\n\n"
-            f"<b>المادة المستخرجة:</b>\n{preview}\n\n"
-            "اختَر الآن ماذا تريد أن أفعل بالمادة:",parse_mode="HTML",reply_markup=file_actions())
+            f"📝 الأحرف المستخرجة: <b>{len(text):,} حرفًا</b>\n\n"
+            "اختَر الآن ماذا تريد أن أفعل بالمادة:",
+            parse_mode="HTML",
+            reply_markup=file_actions()
+        )
     except Exception as exc:
         logger.exception("File processing failed for user %s",m.from_user.id)
         reason=str(exc).strip() or "سبب غير معروف"
