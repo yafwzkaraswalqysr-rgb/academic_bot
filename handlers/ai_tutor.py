@@ -169,10 +169,15 @@ def _normalize_question(q, kind):
 async def generate_questions(source, kind, count):
     if not ai_service.available or count <= 0:
         return []
+    
+    clean_source = str(source or "").strip()
+    if len(clean_source) > 8000:
+        clean_source = clean_source[:8000]
+
     all_questions = []
     seen = set()
     empty_rounds = 0
-    source_text = source[:AI_SOURCE_CHARS]
+    
     while len(all_questions) < count:
         batch_count = min(AI_QUIZ_BATCH_SIZE, count - len(all_questions))
         previous = '\n'.join(q['question'] for q in all_questions[-30:])
@@ -185,15 +190,17 @@ async def generate_questions(source, kind, count):
             'ai_match': 'مطابقة: مصطلح أو فكرة مع التعريف/المطابقة الصحيحة.',
             'ai_flash': 'بطاقات مراجعة: سؤال مباشر وإجابة مختصرة.',
             'ai_mixed': 'امتحان مختلط من MCQ وTF وshort وfill.',
-        }[kind]
-        prompt = f'''أنشئ حتى {batch_count} عنصرًا فقط من المادة المرفقة. {labels}
-اعتمد على المادة فقط، ولا تخترع معلومات. إذا كانت المادة لا تكفي، أرجع العدد الممكن فقط.
-أعد JSON فقط بهذا الشكل: {{"questions":[{{"type":"mcq|tf|short|fill|qa|flash|match","question":"...","options":["..."],"answer":"...","explanation":"..."}}]}}
-لا تضع أي كلام قبل JSON أو بعده.
+        }.get(kind, 'أسئلة متنوعة من المادة.')
+
+        prompt = f'''أنشئ حتى {batch_count} عنصرًا من النص المرفق. {labels}
+أعد الناتج حصرياً بصيغة JSON صحيحة بهذا الشكل الدقيق بدون أي إضافات أو نصوص أخرى:
+{{"questions":[{{"type":"mcq","question":"النص هنا","options":["خيار 1","خيار 2","خيار 3","خيار 4"],"answer":"الخيار الصحيح","explanation":"التوضيح"}}]}}
+
 العناصر التي سبقت، لتجنب التكرار:
 {previous[:5000]}
-المادة:
-{source_text}'''
+
+النص:
+{clean_source}'''
         try:
             raw = await asyncio.wait_for(ai_service.call(prompt), timeout=AI_TIMEOUT)
         except Exception as exc:
