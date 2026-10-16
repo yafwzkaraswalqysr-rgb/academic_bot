@@ -25,7 +25,7 @@ class AITutorStates(StatesGroup):
     quiz = State()
     ask = State()
     generated = State()
-    page_range = State() # الحالة الجديدة الخاصة بنطاق الصفحات
+    page_range = State()
 
 MODES = {
     'ai_ask': '❓ سؤال وجواب',
@@ -250,13 +250,31 @@ async def _send_chunked(m, text, reply_markup=None):
         await m.answer(part, parse_mode='HTML', reply_markup=reply_markup if i == len(parts)-1 else None)
 
 
-async def _current_material(uid):
+async def _current_material(uid, state: FSMContext = None):
     row = await get_session(uid)
-    if not row:
-        return None
-    return {'title': row.source_title, 'text': row.source_text, 'section': row.section,
-            'content_id': row.source_content_id, 'content_type': row.source_content_type,
-            'mode': row.current_mode}
+    if row and row.source_text:
+        return {
+            'title': row.source_title, 
+            'text': row.source_text, 
+            'section': row.section,
+            'content_id': row.source_content_id, 
+            'content_type': row.source_content_type,
+            'mode': row.current_mode
+        }
+    if state:
+        d = await state.get_data()
+        fallback_text = d.get('pending_text_content') or "ملف تعليمي"
+        fallback_title = d.get('pending_filename') or d.get('default_title') or "مادة"
+        if fallback_text:
+            return {
+                'title': fallback_title,
+                'text': fallback_text,
+                'section': 'school',
+                'content_id': None,
+                'content_type': 'pdf',
+                'mode': None
+            }
+    return None
 
 
 async def _save_material(uid, *, title, text, section='university', content_id=None, content_type=None):
@@ -266,8 +284,8 @@ async def _save_material(uid, *, title, text, section='university', content_id=N
     return await save_session(uid, title=title or 'مادة', text=text, section=section, content_id=content_id, content_type=content_type, mode=None)
 
 
-async def _show_mode_menu(m, uid):
-    material = await _current_material(uid)
+async def _show_mode_menu(m, uid, state: FSMContext = None):
+    material = await _current_material(uid, state)
     if not material:
         await m.answer('📚 لا توجد مادة محفوظة حاليًا. أرسل المادة أولًا.')
         return False
@@ -284,13 +302,13 @@ async def ai_start(m: Message, state: FSMContext, source=None, preferred_mode=No
     await state.clear()
     if source:
         await _save_material(m.from_user.id, title='مادة', text=source)
-    material = await _current_material(m.from_user.id)
+    material = await _current_material(m.from_user.id, state)
     if material:
         if preferred_mode:
             await state.set_state(AITutorStates.mode)
             return await start_mode(m, state, preferred_mode)
         await state.set_state(AITutorStates.mode)
-        return await _show_mode_menu(m, m.from_user.id)
+        return await _show_mode_menu(m, m.from_user.id, state)
     await state.set_state(AITutorStates.source)
     if preferred_mode:
         await state.update_data(preferred_mode=preferred_mode)
@@ -298,12 +316,34 @@ async def ai_start(m: Message, state: FSMContext, source=None, preferred_mode=No
                    parse_mode='HTML', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ إلغاء', callback_data='ai_home')]]))
 
 
+@router.callback_query(F.data.startswith('study_content:'))
+async def study_content(c: CallbackQuery, state: FSMContext):
+    from database import async_session_maker
+    from models import SchoolContent
+    from sqlalchemy import select
+    if not c.from_user:
+        return await c.answer()
+    cid = int(c.data.split(':',1)[1])
+    async with async_session_maker() as s:
+        item = await s.scalar(select(SchoolContent).where(SchoolContent.id == cid))
+    if not item:
+        return await c.answer('المادة غير موجودة', show_alert=True)
+    if not item.text_content:
+        return await c.answer('هذه المادة لا تحتوي نصًا مستخرجًا يمكن استخدامه حاليًا.', show_alert=True)
+    await _save_material(c.from_user.id, title=item.title, text=item.text_content,
+                         section='school', content_id=item.id, content_type=item.content_type)
+    await state.clear(); await state.set_state(AITutorStates.mode)
+    await c.message.answer(f'📖 <b>تم حفظ المادة:</b> {safe_html_escape(item.title)}\n\nاختَر الخدمة:',
+                            parse_mode='HTML', reply_markup=mode_keyboard())
+    await c.answer()
+
+
 @router.message(AITutorStates.source, F.text)
 async def ai_source(m: Message, state: FSMContext):
     d = await state.get_data()
     text = m.text.strip()
     if d.get('mode') == 'ai_ask':
-        material = await _current_material(m.from_user.id)
+        material = await _current_material(m.from_user.id, state)
         if not material:
             return await m.answer('انتهت المادة الحالية. أرسل المادة من جديد.')
         await answer_free_question(m, state, text, material)
@@ -315,7 +355,7 @@ async def ai_source(m: Message, state: FSMContext):
     preferred = d.get('preferred_mode')
     if preferred:
         return await start_mode(m, state, preferred)
-    await _show_mode_menu(m, m.from_user.id)
+    await _show_mode_menu(m, m.from_user.id, state)
 
 
 async def answer_free_question(m, state, question, material):
@@ -361,7 +401,7 @@ async def ai_change_mode(c, state):
 
 @router.callback_query(F.data == 'ai_new_question')
 async def ai_new_question(c, state):
-    material = await _current_material(c.from_user.id)
+    material = await _current_material(c.from_user.id, state)
     if not material:
         return await c.answer('لا توجد مادة حالية.', show_alert=True)
     await state.clear(); await state.set_state(AITutorStates.ask); await update_session_mode(c.from_user.id, 'ai_ask')
@@ -370,11 +410,10 @@ async def ai_new_question(c, state):
 
 @router.callback_query(F.data.in_(list(MODES)))
 async def ai_mode(c: CallbackQuery, state: FSMContext):
-    material = await _current_material(c.from_user.id)
+    material = await _current_material(c.from_user.id, state)
     if not material:
         return await c.answer('📚 لا توجد مادة حالية. أرسل المادة أولًا.', show_alert=True)
     
-    # حفظ الخدمة المطلوبة مؤقتاً والانتقال لطلب نطاق الصفحات
     await state.update_data(pending_mode=c.data)
     await state.set_state(AITutorStates.page_range)
     
@@ -400,32 +439,8 @@ async def pages_all(c: CallbackQuery, state: FSMContext):
 
 @router.message(AITutorStates.page_range, F.text)
 async def page_range_input(m: Message, state: FSMContext):
-    text = m.text.strip()
     d = await state.get_data()
     mode = d.get('pending_mode')
-    
-    # معالجة نطاق الصفحات (مثال البحث عن رقم الصفحة داخل النص مثل "1" أو "2" وتصفيتها)
-    material = await _current_material(m.from_user.id)
-    if material and '-' in text:
-        try:
-            parts = text.split('-')
-            start_p = int(parts[0].strip())
-            end_p = int(parts[1].strip())
-            
-            # فلترة النص بناءً على أرقام الصفحات الموجودة في النص (مثل ظهور الأرقام 1, 2, 3...)
-            orig_text = material['text']
-            filtered_chunks = []
-            for p in range(start_p, end_p + 1):
-                if f"\n{p}\n" in orig_text or f" {p} " in orig_text:
-                    filtered_chunks.append(f"--- صفحة {p} ---")
-            
-            if filtered_chunks:
-                # إذا وجدنا الصفحات نعدل النص المؤقت للجلسة
-                pass # سنعتمد على النص الكامل مع توجيه الذكاء الاصطناعي بالتركيز على النطاق
-        except Exception:
-            pass
-
-    await state.update_data(page_filter=text)
     await start_mode(m, state, mode)
 
 
@@ -461,7 +476,7 @@ async def ai_custom_count(m, state):
     await _run_count(m, state, count)
 
 async def start_mode(m, state, mode):
-    material = await _current_material(m.from_user.id)
+    material = await _current_material(m.from_user.id, state)
     if not material:
         return await m.answer('📚 لا توجد مادة حالية. أرسل المادة أولًا.')
     if not ai_service.available:
@@ -502,8 +517,8 @@ async def start_mode(m, state, mode):
 async def _run_count(m, state, count):
     d = await state.get_data(); mode = d.get('requested_mode')
     if not mode:
-        mode = (await _current_material(m.from_user.id) or {}).get('mode') or 'ai_ask'
-    material = await _current_material(m.from_user.id)
+        mode = (await _current_material(m.from_user.id, state) or {}).get('mode') or 'ai_ask'
+    material = await _current_material(m.from_user.id, state)
     if not material:
         return await m.answer('لا توجد مادة حالية.')
     if not ai_service.available:
@@ -566,7 +581,7 @@ async def ai_qpage(c, state):
 @router.message(AITutorStates.generated, F.text)
 async def generated_text(m, state):
     await state.clear(); await state.set_state(AITutorStates.ask)
-    material=await _current_material(m.from_user.id)
+    material=await _current_material(m.from_user.id, state)
     if material:
         await answer_free_question(m,state,m.text.strip(),material)
     else:
@@ -575,7 +590,7 @@ async def generated_text(m, state):
 
 @router.message(AITutorStates.ask, F.text)
 async def ask_continuous(m, state):
-    material = await _current_material(m.from_user.id)
+    material = await _current_material(m.from_user.id, state)
     if not material:
         return await m.answer('لا توجد مادة حالية. أرسل مادة جديدة.')
     await answer_free_question(m, state, m.text.strip(), material)
