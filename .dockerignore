@@ -1,0 +1,24 @@
+# Secrets and local runtime state
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+
+# Databases, logs, uploads and temporary files
+*.db
+*.sqlite
+*.sqlite3
+*.log
+bot.log
+uploads/
+temp/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# VCS / editor / local environments
+.git/
+.gitignore
+.venv/
+venv/
