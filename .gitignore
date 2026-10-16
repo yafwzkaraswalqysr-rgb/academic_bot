@@ -1,0 +1,13 @@
+.env
+*.db
+*.sqlite*
+bot.log
+uploads/
+temp/
+__pycache__/
+.pytest_cache/
+*.session
+
+*.session-journal
+.python-version
+.railway/

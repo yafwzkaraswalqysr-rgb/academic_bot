@@ -1,0 +1,86 @@
+[
+  {
+    "key": "school",
+    "label": "🏫 مدرستي",
+    "enabled": true,
+    "order": 10,
+    "action": "builtin:school"
+  },
+  {
+    "key": "university",
+    "label": "🎓 الجامعة",
+    "enabled": true,
+    "order": 20,
+    "action": "builtin:university"
+  },
+  {
+    "key": "search",
+    "label": "🔎 بحث",
+    "enabled": true,
+    "order": 30,
+    "action": "builtin:search"
+  },
+  {
+    "key": "graduation",
+    "label": "🎓 مشروع التخرج",
+    "enabled": true,
+    "order": 40,
+    "action": "builtin:graduation"
+  },
+  {
+    "key": "ai",
+    "label": "🤖 اسأل الذكاء الاصطناعي",
+    "enabled": true,
+    "order": 50,
+    "action": "builtin:ai"
+  },
+  {
+    "key": "study",
+    "label": "📚 دراستي",
+    "enabled": true,
+    "order": 60,
+    "action": "builtin:study"
+  },
+  {
+    "key": "library",
+    "label": "🗂 مكتبتي",
+    "enabled": true,
+    "order": 70,
+    "action": "builtin:library"
+  },
+  {
+    "key": "saved",
+    "label": "⭐ المحفوظات",
+    "enabled": true,
+    "order": 80,
+    "action": "builtin:saved"
+  },
+  {
+    "key": "account",
+    "label": "👤 حسابي",
+    "enabled": true,
+    "order": 90,
+    "action": "builtin:account"
+  },
+  {
+    "key": "help",
+    "label": "ℹ️ المساعدة",
+    "enabled": true,
+    "order": 100,
+    "action": "builtin:help"
+  },
+  {
+    "key": "delete_account",
+    "label": "🗑 حذف حسابي",
+    "enabled": true,
+    "order": 110,
+    "action": "builtin:delete_account"
+  },
+  {
+    "key": "home",
+    "label": "🏠 القائمة الرئيسية",
+    "enabled": true,
+    "order": 120,
+    "action": "builtin:home"
+  }
+]
