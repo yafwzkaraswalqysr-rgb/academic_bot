@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from student_system import load_buttons,save_buttons,DEFAULT_BUTTONS
 from utils.helpers import get_main_menu_for_user
 from utils.admin_access import is_admin, is_owner
+from services.content_index import extract_telegram_document
 from services.search_engine import search_engine
 from services.usage_service import record_event
 from utils.security import safe_html_escape
@@ -31,6 +32,7 @@ def menu():
         [InlineKeyboardButton(text='👨‍💼 إدارة المدراء',callback_data='adm_admins'),InlineKeyboardButton(text='🔎 إعادة الفهرسة',callback_data='adm_reindex')],
         [InlineKeyboardButton(text='🔘 إدارة الأزرار',callback_data='adm_buttons'),InlineKeyboardButton(text='🤖 حالة الذكاء الاصطناعي',callback_data='adm_ai_status')],
     ])
+
 class A(StatesGroup):
     tg_name=State();tg_user=State();tg_edit=State();web_name=State();web_search=State();web_edit=State();button_label=State();button_content=State();button_link=State();school_file=State();school_path=State();school_title=State();school_publish_branch=State();school_edit=State()
     # الحالات الجديدة للتحكم اليدوي بالوصف
@@ -129,11 +131,13 @@ async def tg(c):
     rows=[[InlineKeyboardButton(text=f"{'🟢' if x.enabled else '🔴'} {x.name}",callback_data=f'tg_toggle_{x.id}'),InlineKeyboardButton(text='✏️',callback_data=f'tg_edit_{x.id}'),InlineKeyboardButton(text='🗑',callback_data=f'tg_del_{x.id}')] for x in items]
     rows += [[InlineKeyboardButton(text='➕ إضافة قناة',callback_data='addtg')],[InlineKeyboardButton(text='🏠',callback_data='admin_home')]]
     await c.message.answer('📡 <b>مصادر Telegram</b>',parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await c.answer()
+
 @router.callback_query(F.data=='admin_home')
 async def ah(c, state):
     if not is_admin(c.from_user.id): return await c.answer('غير مسموح',show_alert=True)
     await state.clear()
     await c.message.answer('🛠 لوحة المالك',reply_markup=menu());await c.answer()
+
 @router.callback_query(F.data.startswith('tg_toggle_'))
 async def tgt(c):
     if not is_admin(c.from_user.id):return await c.answer('غير مسموح',show_alert=True)
@@ -141,6 +145,7 @@ async def tgt(c):
         x=await s.get(TelegramSource,int(c.data[10:]));
         if x:x.enabled=not x.enabled;await s.commit()
     search_engine.invalidate(); await c.answer('تم تغيير الحالة');await tg(c)
+
 @router.callback_query(F.data.startswith('tg_edit_'))
 async def tg_edit_start(c,state):
     if not is_admin(c.from_user.id): return await c.answer('غير مسموح',show_alert=True)
@@ -177,14 +182,17 @@ async def tgd(c):
     if not is_admin(c.from_user.id):return await c.answer('غير مسموح',show_alert=True)
     async with async_session_maker() as s:await s.execute(delete(TelegramSource).where(TelegramSource.id==int(c.data[7:])));await s.commit()
     search_engine.invalidate(); await c.answer('تم الحذف');await tg(c)
+
 @router.callback_query(F.data=='addtg')
 async def addtg(c,state):
     if not is_admin(c.from_user.id): return await c.answer('غير مسموح',show_alert=True)
     await state.set_state(A.tg_name);await c.message.answer('اسم القناة:');await c.answer()
+
 @router.message(A.tg_name)
 async def tgn(m,state):
     if not is_admin(m.from_user.id): return
     await state.update_data(name=m.text.strip());await state.set_state(A.tg_user);await m.answer('username القناة (مثال @example):')
+
 @router.message(A.tg_user)
 async def tgu(m,state):
     if not is_admin(m.from_user.id):return
@@ -199,6 +207,7 @@ async def tgu(m,state):
         await s.commit()
     await record_event(m.from_user.id,'channel_added',metadata={'source': raw[:200]})
     search_engine.invalidate(); await state.clear();await m.answer('✅ تمت إضافة المصدر. الروابط و@username وChat ID مدعومة.',reply_markup=menu())
+
 @router.callback_query(F.data=='adm_web')
 async def web(c):
     if not is_admin(c.from_user.id):return await c.answer('غير مسموح',show_alert=True)
@@ -206,6 +215,7 @@ async def web(c):
     rows=[[InlineKeyboardButton(text=f"{'🟢' if x.enabled else '🔴'} {x.name}",callback_data=f'web_toggle_{x.id}'),InlineKeyboardButton(text='✏️',callback_data=f'web_edit_{x.id}'),InlineKeyboardButton(text='🗑',callback_data=f'web_del_{x.id}')] for x in items]
     rows += [[InlineKeyboardButton(text='➕ إضافة موقع',callback_data='addweb')],[InlineKeyboardButton(text='🏠',callback_data='admin_home')]]
     await c.message.answer('🌐 <b>مصادر الويب</b>',parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=rows));await c.answer()
+
 @router.callback_query(F.data.startswith('web_toggle_'))
 async def webt(c):
     if not is_admin(c.from_user.id):return await c.answer('غير مسموح',show_alert=True)
@@ -213,6 +223,7 @@ async def webt(c):
         x=await s.get(WebSource,int(c.data[11:]));
         if x:x.enabled=not x.enabled;await s.commit()
     search_engine.invalidate(); await c.answer('تم');await web(c)
+
 @router.callback_query(F.data.startswith('web_edit_'))
 async def web_edit_start(c,state):
     if not is_admin(c.from_user.id):return await c.answer('غير مسموح',show_alert=True)
@@ -242,14 +253,17 @@ async def webd(c):
     if not is_admin(c.from_user.id):return await c.answer('غير مسموح',show_alert=True)
     async with async_session_maker() as s:await s.execute(delete(WebSource).where(WebSource.id==int(c.data[8:])));await s.commit()
     search_engine.invalidate(); await c.answer('تم الحذف');await web(c)
+
 @router.callback_query(F.data=='addweb')
 async def addweb(c,state):
     if not is_admin(c.from_user.id):return await c.answer('غير مسموح',show_alert=True)
     await state.set_state(A.web_name);await c.message.answer('اسم الموقع:');await c.answer()
+
 @router.message(A.web_name)
 async def wname(m,state):
     if not is_admin(m.from_user.id): return
     await state.update_data(name=m.text.strip());await state.set_state(A.web_search);await m.answer('رابط البحث، ويجب أن يحتوي {query} مكان الاستعلام.')
+
 @router.message(A.web_search)
 async def wsearch(m,state):
     if not is_admin(m.from_user.id): return
@@ -358,9 +372,6 @@ async def owner_pdf_path(m, state):
     await state.clear()
     await m.answer('✅ <b>تم حفظ الزر والملف بنجاح.</b>\n\n📍 المكان:\n'+m.text.strip()+'\n\n📄 الملف سيُرسل للمستخدم مباشرة، ولن يُرسل تلقائيًا إلى الذكاء الاصطناعي.', parse_mode='HTML', reply_markup=menu())
 
-from sqlalchemy import or_
-from models import SchoolPlacement
-
 SCHOOL_KINDS = [
     ("📚 كتب","📚 كتب"),("📝 ملازم","📝 ملازم"),("📌 ملخصات","📌 ملخصات"),
     ("👨‍🏫 مدرسين","👨‍🏫 مدرسين"),("📘 شروحات","📘 شروحات"),("🎓 قبولات","🎓 قبولات"),
@@ -416,7 +427,6 @@ async def sc_add(c,state):
     await c.answer()
 
 async def _begin_school_content(message, state, *, content_kind, text_content="", url="", photo_id="", video_id="", file_id="", filename="", mime_type=""):
-    """بدلاً من الاستخراج التلقائي المزعج، نقوم بحفظ الملف مؤقتاً ونعرض خيار الوصف (نعم / لا)"""
     text_content=(text_content or "").strip()[:250000]
     url=(url or "").strip()[:2000]
     await state.update_data(
@@ -430,7 +440,6 @@ async def _begin_school_content(message, state, *, content_kind, text_content=""
         default_title=(filename.rsplit(".",1)[0] if filename else (text_content[:80] or content_kind))[:500],
     )
     
-    # الانتقال إلى حالة سؤال الوصف اليدوي بدلاً من المتابعة التلقائية
     await state.set_state(A.school_ask_desc)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -447,7 +456,6 @@ async def _begin_school_content(message, state, *, content_kind, text_content=""
         reply_markup=kb
     )
 
-# معالجة اختيار عدم إضافة وصف
 @router.callback_query(A.school_ask_desc, F.data == "sc_desc_no")
 async def owner_desc_no(c: CallbackQuery, state: FSMContext):
     await state.update_data(pending_text_content="")
@@ -460,7 +468,6 @@ async def owner_desc_no(c: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
 
-# معالجة اختيار إضافة وصف
 @router.callback_query(A.school_ask_desc, F.data == "sc_desc_yes")
 async def owner_desc_yes(c: CallbackQuery, state: FSMContext):
     await c.answer()
@@ -470,7 +477,6 @@ async def owner_desc_yes(c: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
 
-# استقبال الوصف المكتوب يدوياً من المالك
 @router.message(A.school_custom_desc, F.text)
 async def owner_custom_desc_text(m: Message, state: FSMContext):
     custom_text = m.text.strip()[:250000]
@@ -496,7 +502,6 @@ async def owner_school_document_input(m, state):
     if doc.file_size and doc.file_size > MAX_FILE_SIZE:
         return await m.answer(f"❌ الملف كبير جدًا. الحد {MAX_FILE_SIZE/1024/1024:.0f} MB.")
     d=await state.get_data()
-    # تم إلغاء الاستخراج التلقائي للنص (extract_telegram_document) هنا تماماً بناءً على طلبك
     await _begin_school_content(m,state,content_kind=d.get("school_kind","المحتوى"),text_content="",file_id=doc.file_id,filename=name,mime_type=doc.mime_type or "application/octet-stream")
 
 @router.message(A.school_file, F.photo)
